@@ -29,6 +29,7 @@ type Server struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
 	users    map[string]*session
+	hosts    map[string]string
 	metrics  metrics
 }
 
@@ -66,6 +67,7 @@ func New(config Config, auth Authenticator) (*Server, error) {
 		auth:     auth,
 		sessions: make(map[string]*session),
 		users:    make(map[string]*session),
+		hosts:    make(map[string]string),
 	}, nil
 }
 
@@ -97,11 +99,15 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user already has an active tunnel", http.StatusConflict)
 		return
 	}
-	host, err := s.newHostLocked()
-	if err != nil {
-		s.mu.Unlock()
-		http.Error(w, "allocate tunnel host", http.StatusInternalServerError)
-		return
+	host, found := s.hosts[userID]
+	if !found {
+		host, err = s.newHostLocked()
+		if err != nil {
+			s.mu.Unlock()
+			http.Error(w, "allocate tunnel host", http.StatusInternalServerError)
+			return
+		}
+		s.hosts[userID] = host
 	}
 	conn, err := websocket.Upgrade(w, r)
 	if err != nil {
@@ -138,11 +144,23 @@ func (s *Server) newHostLocked() (string, error) {
 		}
 		label := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf))
 		host := label + "." + strings.ToLower(s.config.BaseDomain)
-		if _, found := s.sessions[host]; !found {
+		if !s.hostAssignedLocked(host) {
 			return host, nil
 		}
 	}
 	return "", fmt.Errorf("could not allocate unique hostname")
+}
+
+func (s *Server) hostAssignedLocked(host string) bool {
+	if _, found := s.sessions[host]; found {
+		return true
+	}
+	for _, assigned := range s.hosts {
+		if assigned == host {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *session) dispatch(msg protocol.Message) {

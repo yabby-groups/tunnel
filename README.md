@@ -2,7 +2,8 @@
 
 Myna Tunnel is a self-hosted, temporary HTTP and WebSocket reverse tunnel. A
 client makes one authenticated outbound WSS connection; public traffic for its
-random subdomain is multiplexed over that connection to a local service.
+random subdomain is multiplexed over that connection to a local service. The
+same authenticated user reuses that subdomain after the client reconnects.
 
 ## Quick start
 
@@ -47,6 +48,8 @@ For a production Caddy starting point, see `deploy/Caddyfile`. Point
 wildcard subdomains at the tunnel server. DNS must provide wildcard coverage
 and Caddy must obtain a wildcard TLS certificate. Run one `tunnel-server`
 replica: active hostname-to-connection mappings are intentionally in-memory.
+Client reconnects retain their address while this process remains running;
+server restarts allocate addresses again.
 
     tunnel-server -listen :8080 -base-domain tunnel.example.com \
       -control-url https://myna.example.com/api/tunnel/validate
@@ -60,5 +63,5 @@ replica: active hostname-to-connection mappings are intentionally in-memory.
 - Defaults: one active tunnel per user, 100 concurrent HTTP requests per
   tunnel, a 32 MiB request body, and a 60 second request timeout.
 
-This MVP intentionally excludes persistent names, custom domains, TCP
-forwarding, billing, and request-body logging.
+This MVP intentionally excludes names that persist across server restarts,
+custom domains, TCP forwarding, billing, and request-body logging.
