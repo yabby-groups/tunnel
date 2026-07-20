@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -176,6 +177,9 @@ func (t *Tunnel) openWebSocket(ctx context.Context, local *url.URL, msg protocol
 }
 
 func normalizeLocalURL(raw string) (*url.URL, error) {
+	if port, err := strconv.ParseUint(raw, 10, 16); err == nil && port > 0 {
+		raw = "http://127.0.0.1:" + raw
+	}
 	if !strings.Contains(raw, "://") {
 		raw = "http://" + raw
 	}
