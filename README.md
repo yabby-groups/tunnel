@@ -37,6 +37,22 @@ The control plane must bind credentials to the logged-in user, allow revocation,
 and reject expired credentials. The CLI stores the returned credential in the
 user config directory with mode 0600.
 
+Set `TUNNEL_VERIFICATION_URI=https://myna.example.com/tunnel/authorize` on the
+Myna backend. Users open that authenticated page, enter the CLI's user code,
+then the CLI receives its credential on the next poll. Credentials expire after
+30 days and can be revoked from the same page.
+
+For a production Caddy starting point, see `deploy/Caddyfile`. Point
+`myna.example.com` at the Myna backend and both `tunnel.example.com` and its
+wildcard subdomains at the tunnel server. DNS must provide wildcard coverage
+and Caddy must obtain a wildcard TLS certificate. Run one `tunnel-server`
+replica: active hostname-to-connection mappings are intentionally in-memory.
+
+    tunnel-server -listen :8080 -base-domain tunnel.example.com \
+      -control-url https://myna.example.com/api/tunnel/validate
+    tunnel login -control-url https://myna.example.com
+    tunnel http -server wss://tunnel.example.com/connect 3000
+
 ## Operations
 
 - /healthz and /readyz return process health.

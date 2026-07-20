@@ -36,7 +36,7 @@ func main() {
 
 func login(args []string) {
 	flags := flag.NewFlagSet("login", flag.ExitOnError)
-	controlURL := flags.String("control-url", "", "myna control-plane base URL")
+	controlURL := flags.String("control-url", "https://iot.huabot.com", "myna control-plane base URL")
 	flags.Parse(args)
 	if *controlURL == "" {
 		fmt.Fprintln(os.Stderr, "-control-url is required")
@@ -58,7 +58,7 @@ func login(args []string) {
 
 func runHTTP(args []string) {
 	flags := flag.NewFlagSet("http", flag.ExitOnError)
-	serverURL := flags.String("server", "", "wss:// tunnel server /connect URL")
+	serverURL := flags.String("server", "wss://tunnel.huabot.com/connect", "wss:// tunnel server /connect URL")
 	token := flags.String("token", os.Getenv("TUNNEL_TOKEN"), "tunnel credential")
 	flags.Parse(args)
 	if *serverURL == "" || flags.NArg() != 1 {
