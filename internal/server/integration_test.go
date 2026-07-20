@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/myna-server/tunnel/internal/client"
-	"github.com/myna-server/tunnel/internal/server"
-	"github.com/myna-server/tunnel/internal/websocket"
+	"github.com/yabby-groups/tunnel/internal/client"
+	"github.com/yabby-groups/tunnel/internal/server"
+	"github.com/yabby-groups/tunnel/internal/websocket"
 )
 
 func TestHTTPForwarding(t *testing.T) {

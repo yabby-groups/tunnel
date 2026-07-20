@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/myna-server/tunnel/internal/client"
+	"github.com/yabby-groups/tunnel/internal/client"
 )
 
 type credentials struct {

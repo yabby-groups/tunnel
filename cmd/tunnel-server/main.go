@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/myna-server/tunnel/internal/server"
+	"github.com/yabby-groups/tunnel/internal/server"
 )
 
 func main() {

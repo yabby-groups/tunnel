@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/myna-server/tunnel/internal/protocol"
-	"github.com/myna-server/tunnel/internal/websocket"
+	"github.com/yabby-groups/tunnel/internal/protocol"
+	"github.com/yabby-groups/tunnel/internal/websocket"
 )
 
 type Tunnel struct {

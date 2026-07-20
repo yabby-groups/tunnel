@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/myna-server/tunnel/internal/protocol"
-	"github.com/myna-server/tunnel/internal/websocket"
+	"github.com/yabby-groups/tunnel/internal/protocol"
+	"github.com/yabby-groups/tunnel/internal/websocket"
 )
 
 type Config struct {

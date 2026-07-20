@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/myna-server/tunnel/internal/client"
+	"github.com/yabby-groups/tunnel/internal/client"
 )
 
 func TestReconnectReusesHostAndForwardsRequests(t *testing.T) {
