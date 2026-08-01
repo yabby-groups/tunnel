@@ -20,11 +20,13 @@ import (
 )
 
 type Tunnel struct {
-	ServerURL string
-	Token     string
-	LocalURL  string
-	OnURL     func(string)
-	OnRequest func(method, path string, status int, elapsed time.Duration)
+	ServerURL     string
+	Token         string
+	LocalURL      string
+	Subdomain     string
+	temporaryHost string
+	OnURL         func(string)
+	OnRequest     func(method, path string, status int, elapsed time.Duration)
 }
 
 func (t *Tunnel) Run(ctx context.Context) error {
@@ -51,7 +53,20 @@ func (t *Tunnel) Run(ctx context.Context) error {
 func (t *Tunnel) runOnce(ctx context.Context, dialer websocket.Dialer, local *url.URL) error {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+t.Token)
-	conn, _, err := dialer.DialContext(ctx, t.ServerURL, header)
+	serverURL, err := url.Parse(t.ServerURL)
+	if err != nil {
+		return fmt.Errorf("invalid tunnel server URL: %w", err)
+	}
+	if t.Subdomain != "" {
+		query := serverURL.Query()
+		query.Set("subdomain", t.Subdomain)
+		serverURL.RawQuery = query.Encode()
+	} else if t.temporaryHost != "" {
+		query := serverURL.Query()
+		query.Set("resume_host", t.temporaryHost)
+		serverURL.RawQuery = query.Encode()
+	}
+	conn, _, err := dialer.DialContext(ctx, serverURL.String(), header)
 	if err != nil {
 		return err
 	}
@@ -81,6 +96,13 @@ func (t *Tunnel) runOnce(ctx context.Context, dialer websocket.Dialer, local *ur
 		}
 		switch msg.Type {
 		case protocol.Registered:
+			if t.Subdomain == "" {
+				publicURL, err := url.Parse(msg.URL)
+				if err != nil || publicURL.Hostname() == "" {
+					return fmt.Errorf("invalid registered tunnel URL %q", msg.URL)
+				}
+				t.temporaryHost = strings.ToLower(publicURL.Hostname())
+			}
 			if t.OnURL != nil {
 				t.OnURL(msg.URL)
 			}
@@ -208,8 +230,84 @@ type DeviceAuthorization struct {
 	Interval        int    `json:"interval"`
 }
 
+// Subdomain is one stable public tunnel name owned by the current user.
+type Subdomain struct {
+	ID        int    `json:"id"`
+	Subdomain string `json:"subdomain"`
+	CreatedAt int64  `json:"created_at"`
+}
+
 type tokenResponse struct {
 	Token string `json:"token"`
+}
+
+func controlRequest(ctx context.Context, controlURL, token, method, path string, payload any, result any) error {
+	var body io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(
+		ctx, method, strings.TrimRight(controlURL, "/")+path, body,
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-REQUEST-TOKEN", token)
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("tunnel control request failed: %s: %s", resp.Status, strings.TrimSpace(string(raw)))
+	}
+	return json.NewDecoder(resp.Body).Decode(result)
+}
+
+// ListSubdomains returns the stable tunnel names owned by the credential user.
+func ListSubdomains(ctx context.Context, controlURL, token string) ([]Subdomain, error) {
+	var response struct {
+		Subdomains []Subdomain `json:"subdomains"`
+	}
+	if err := controlRequest(ctx, controlURL, token, http.MethodGet, "/api/tunnel/subdomains/", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Subdomains, nil
+}
+
+// ClaimSubdomain reserves one stable tunnel name for the credential user.
+func ClaimSubdomain(ctx context.Context, controlURL, token, subdomain string) (string, error) {
+	var response struct {
+		Subdomain string `json:"subdomain"`
+	}
+	err := controlRequest(ctx, controlURL, token, http.MethodPost, "/api/tunnel/subdomains/", struct {
+		Subdomain string `json:"subdomain"`
+	}{Subdomain: subdomain}, &response)
+	if err != nil {
+		return "", err
+	}
+	if response.Subdomain == "" {
+		return "", fmt.Errorf("tunnel control returned an empty subdomain")
+	}
+	return response.Subdomain, nil
+}
+
+// ReleaseSubdomain releases a stable tunnel name owned by the credential user.
+func ReleaseSubdomain(ctx context.Context, controlURL, token string, subdomainID int) error {
+	var response struct {
+		Result string `json:"result"`
+	}
+	return controlRequest(ctx, controlURL, token, http.MethodPost, "/api/tunnel/subdomains/release/", struct {
+		SubdomainID int `json:"subdomain_id"`
+	}{SubdomainID: subdomainID}, &response)
 }
 
 // Login implements the documented myna device-authorization contract.

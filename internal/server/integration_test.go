@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -156,5 +157,84 @@ func TestWebSocketForwarding(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("client did not stop")
+	}
+}
+
+func TestFixedSubdomainsCanRunConcurrently(t *testing.T) {
+	newLocal := func(body string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+	}
+	first := newLocal("first")
+	defer first.Close()
+	second := newLocal("second")
+	defer second.Close()
+
+	tunnelServer, err := server.New(server.Config{BaseDomain: "tunnel.test"}, server.StaticAuthenticator{Token: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := httptest.NewServer(tunnelServer.Handler())
+	defer public.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	urls := make(chan string, 2)
+	start := func(localURL, subdomain string) chan error {
+		done := make(chan error, 1)
+		go func() {
+			done <- (&client.Tunnel{
+				ServerURL: "ws" + strings.TrimPrefix(public.URL, "http") + "/connect",
+				Token:     "test-token", LocalURL: localURL, Subdomain: subdomain,
+				OnURL: func(value string) { urls <- value },
+			}).Run(ctx)
+		}()
+		return done
+	}
+	firstDone := start(first.URL, "first")
+	secondDone := start(second.URL, "second")
+
+	registered := map[string]bool{}
+	for len(registered) != 2 {
+		select {
+		case value := <-urls:
+			registered[value] = true
+		case <-time.After(3 * time.Second):
+			t.Fatal("fixed tunnels did not register")
+		}
+	}
+	for host, want := range map[string]string{
+		"first.tunnel.test":  "first",
+		"second.tunnel.test": "second",
+	} {
+		request, err := http.NewRequest(http.MethodGet, public.URL+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Host = host
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK || string(body) != want {
+			t.Fatalf("host %s response = %d %q, want 200 %q", host, response.StatusCode, body, want)
+		}
+	}
+	cancel()
+	for _, done := range []chan error{firstDone, secondDone} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("fixed tunnel did not stop")
+		}
 	}
 }

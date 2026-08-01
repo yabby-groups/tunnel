@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,8 @@ func main() {
 	switch os.Args[1] {
 	case "login":
 		login(os.Args[2:])
+	case "domains":
+		domains(os.Args[2:])
 	case "http":
 		runHTTP(os.Args[2:])
 	default:
@@ -60,6 +63,7 @@ func runHTTP(args []string) {
 	flags := flag.NewFlagSet("http", flag.ExitOnError)
 	serverURL := flags.String("server", "wss://tunnel.huabot.com/connect", "wss:// tunnel server /connect URL")
 	token := flags.String("token", os.Getenv("TUNNEL_TOKEN"), "tunnel credential")
+	subdomain := flags.String("subdomain", "", "reserved stable subdomain")
 	flags.Parse(args)
 	if *serverURL == "" || flags.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: tunnel http -server wss://tunnel.example.com/connect <port|url>")
@@ -76,7 +80,7 @@ func runHTTP(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	tunnel := client.Tunnel{
-		ServerURL: *serverURL, Token: *token, LocalURL: flags.Arg(0),
+		ServerURL: *serverURL, Token: *token, LocalURL: flags.Arg(0), Subdomain: *subdomain,
 		OnURL: func(url string) { fmt.Println("Forwarding", url) },
 		OnRequest: func(method, path string, status int, elapsed time.Duration) {
 			fmt.Printf("%s %s -> %d (%s)\n", method, path, status, elapsed.Round(time.Millisecond))
@@ -85,6 +89,77 @@ func runHTTP(args []string) {
 	if err := tunnel.Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "tunnel:", err)
 		os.Exit(1)
+	}
+}
+
+func domains(args []string) {
+	flags := flag.NewFlagSet("domains", flag.ExitOnError)
+	controlURL := flags.String("control-url", "https://iot.huabot.com", "myna control-plane base URL")
+	token := flags.String("token", os.Getenv("TUNNEL_TOKEN"), "tunnel credential")
+	flags.Parse(args)
+	if flags.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: tunnel domains [-control-url URL] list|claim|release <subdomain>")
+		os.Exit(2)
+	}
+	if *token == "" {
+		saved, err := loadCredentials()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "read credentials:", err)
+			os.Exit(1)
+		}
+		*token = saved.Token
+	}
+	ctx := context.Background()
+	switch flags.Arg(0) {
+	case "list":
+		if flags.NArg() != 1 {
+			fmt.Fprintln(os.Stderr, "usage: tunnel domains list")
+			os.Exit(2)
+		}
+		items, err := client.ListSubdomains(ctx, *controlURL, *token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "list subdomains:", err)
+			os.Exit(1)
+		}
+		for _, item := range items {
+			fmt.Println(item.Subdomain)
+		}
+	case "claim":
+		if flags.NArg() != 2 {
+			fmt.Fprintln(os.Stderr, "usage: tunnel domains claim <subdomain>")
+			os.Exit(2)
+		}
+		name, err := client.ClaimSubdomain(ctx, *controlURL, *token, flags.Arg(1))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "claim subdomain:", err)
+			os.Exit(1)
+		}
+		fmt.Println("Reserved", name)
+	case "release":
+		if flags.NArg() != 2 {
+			fmt.Fprintln(os.Stderr, "usage: tunnel domains release <subdomain>")
+			os.Exit(2)
+		}
+		items, err := client.ListSubdomains(ctx, *controlURL, *token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "list subdomains:", err)
+			os.Exit(1)
+		}
+		for _, item := range items {
+			if item.Subdomain == strings.ToLower(strings.TrimSpace(flags.Arg(1))) {
+				if err := client.ReleaseSubdomain(ctx, *controlURL, *token, item.ID); err != nil {
+					fmt.Fprintln(os.Stderr, "release subdomain:", err)
+					os.Exit(1)
+				}
+				fmt.Println("Released", item.Subdomain)
+				return
+			}
+		}
+		fmt.Fprintln(os.Stderr, "subdomain not found:", flags.Arg(1))
+		os.Exit(1)
+	default:
+		fmt.Fprintln(os.Stderr, "usage: tunnel domains list|claim|release <subdomain>")
+		os.Exit(2)
 	}
 }
 
@@ -131,5 +206,5 @@ func loadCredentials() (credentials, error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: tunnel login|http")
+	fmt.Fprintln(os.Stderr, "usage: tunnel login|domains|http")
 }

@@ -44,8 +44,12 @@ func TestReconnectReusesHostAndForwardsRequests(t *testing.T) {
 	go func() { done <- tunnel.Run(ctx) }()
 
 	firstURL := waitForURL(t, urls)
+	firstParsed, err := url.Parse(firstURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tunnelServer.mu.RLock()
-	session := tunnelServer.users["development"]
+	session := tunnelServer.sessions[firstParsed.Host]
 	tunnelServer.mu.RUnlock()
 	if session == nil {
 		t.Fatal("active session missing")

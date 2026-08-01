@@ -24,13 +24,12 @@ type Config struct {
 }
 
 type Server struct {
-	config   Config
-	auth     Authenticator
-	mu       sync.RWMutex
-	sessions map[string]*session
-	users    map[string]*session
-	hosts    map[string]string
-	metrics  metrics
+	config         Config
+	auth           Authenticator
+	mu             sync.RWMutex
+	sessions       map[string]*session
+	temporaryHosts map[string]string
+	metrics        metrics
 }
 
 type session struct {
@@ -63,11 +62,10 @@ func New(config Config, auth Authenticator) (*Server, error) {
 		config.MaxConcurrentReq = 100
 	}
 	return &Server{
-		config:   config,
-		auth:     auth,
-		sessions: make(map[string]*session),
-		users:    make(map[string]*session),
-		hosts:    make(map[string]string),
+		config:         config,
+		auth:           auth,
+		sessions:       make(map[string]*session),
+		temporaryHosts: make(map[string]string),
 	}, nil
 }
 
@@ -87,27 +85,53 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing bearer credential", http.StatusUnauthorized)
 		return
 	}
-	userID, err := s.auth.Authenticate(r.Context(), token)
+	subdomain := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("subdomain")))
+	resumeHost := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("resume_host")))
+	if subdomain != "" && !validSubdomain(subdomain) {
+		http.Error(w, "invalid tunnel subdomain", http.StatusBadRequest)
+		return
+	}
+	if subdomain != "" && resumeHost != "" {
+		http.Error(w, "tunnel host request is ambiguous", http.StatusBadRequest)
+		return
+	}
+	userID, err := s.auth.Authenticate(r.Context(), token, subdomain)
 	if err != nil {
 		http.Error(w, "invalid tunnel credential", http.StatusUnauthorized)
 		return
 	}
 
 	s.mu.Lock()
-	if _, exists := s.users[userID]; exists {
-		s.mu.Unlock()
-		http.Error(w, "user already has an active tunnel", http.StatusConflict)
-		return
-	}
-	host, found := s.hosts[userID]
-	if !found {
+	host := ""
+	allocatedTemporaryHost := false
+	if subdomain == "" && resumeHost == "" {
 		host, err = s.newHostLocked()
 		if err != nil {
 			s.mu.Unlock()
 			http.Error(w, "allocate tunnel host", http.StatusInternalServerError)
 			return
 		}
-		s.hosts[userID] = host
+		allocatedTemporaryHost = true
+	} else if resumeHost != "" {
+		owner, found := s.temporaryHosts[resumeHost]
+		if !found || owner != userID {
+			s.mu.Unlock()
+			http.Error(w, "temporary tunnel host is unavailable", http.StatusConflict)
+			return
+		}
+		if _, active := s.sessions[resumeHost]; active {
+			s.mu.Unlock()
+			http.Error(w, "temporary tunnel host is already active", http.StatusConflict)
+			return
+		}
+		host = resumeHost
+	} else {
+		host = subdomain + "." + strings.ToLower(s.config.BaseDomain)
+		if _, exists := s.sessions[host]; exists {
+			s.mu.Unlock()
+			http.Error(w, "tunnel subdomain is already active", http.StatusConflict)
+			return
+		}
 	}
 	conn, err := websocket.Upgrade(w, r)
 	if err != nil {
@@ -118,8 +142,10 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 		server: s, userID: userID, host: host, conn: conn,
 		sem: make(chan struct{}, s.config.MaxConcurrentReq), closed: make(chan struct{}),
 	}
+	if allocatedTemporaryHost {
+		s.temporaryHosts[host] = userID
+	}
 	s.sessions[host] = sess
-	s.users[userID] = sess
 	s.metrics.activeSessions.Add(1)
 	s.mu.Unlock()
 
@@ -155,12 +181,22 @@ func (s *Server) hostAssignedLocked(host string) bool {
 	if _, found := s.sessions[host]; found {
 		return true
 	}
-	for _, assigned := range s.hosts {
-		if assigned == host {
-			return true
-		}
+	if _, found := s.temporaryHosts[host]; found {
+		return true
 	}
 	return false
+}
+
+func validSubdomain(value string) bool {
+	if len(value) <= 4 || len(value) > 63 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, char := range value {
+		if char != '-' && (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *session) dispatch(msg protocol.Message) {
@@ -187,7 +223,6 @@ func (s *session) close() {
 		s.conn.Close()
 		s.server.mu.Lock()
 		delete(s.server.sessions, s.host)
-		delete(s.server.users, s.userID)
 		s.server.metrics.activeSessions.Add(-1)
 		s.server.mu.Unlock()
 	})

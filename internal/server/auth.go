@@ -12,12 +12,12 @@ import (
 )
 
 type Authenticator interface {
-	Authenticate(context.Context, string) (string, error)
+	Authenticate(context.Context, string, string) (string, error)
 }
 
 type StaticAuthenticator struct{ Token string }
 
-func (a StaticAuthenticator) Authenticate(_ context.Context, token string) (string, error) {
+func (a StaticAuthenticator) Authenticate(_ context.Context, token, _ string) (string, error) {
 	if a.Token == "" || token != a.Token {
 		return "", fmt.Errorf("invalid tunnel credential")
 	}
@@ -25,16 +25,18 @@ func (a StaticAuthenticator) Authenticate(_ context.Context, token string) (stri
 }
 
 // HTTPAuthenticator delegates token validation to the myna control plane.
-// The endpoint receives {"token":"..."} and returns {"user_id":"..."}.
+// The endpoint receives {"token":"...","subdomain":"..."} and returns
+// {"user_id":"..."}. An empty subdomain requests a temporary address.
 type HTTPAuthenticator struct {
 	URL    string
 	Client *http.Client
 }
 
-func (a HTTPAuthenticator) Authenticate(ctx context.Context, token string) (string, error) {
+func (a HTTPAuthenticator) Authenticate(ctx context.Context, token, subdomain string) (string, error) {
 	body, err := json.Marshal(struct {
-		Token string `json:"token"`
-	}{Token: token})
+		Token     string `json:"token"`
+		Subdomain string `json:"subdomain,omitempty"`
+	}{Token: token, Subdomain: subdomain})
 	if err != nil {
 		return "", err
 	}
