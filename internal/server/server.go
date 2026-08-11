@@ -276,7 +276,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if response.Type == protocol.ResponseStart {
-			s.proxyEventStream(w, r, sess, reply, response, cancel)
+			s.proxyStream(w, r, sess, reply, response, cancel)
 			return
 		}
 		copyHeader(w.Header(), response.Header)
@@ -294,7 +294,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) proxyEventStream(w http.ResponseWriter, r *http.Request, sess *session, events <-chan protocol.Message, start protocol.Message, cancel func()) {
+func (s *Server) proxyStream(w http.ResponseWriter, r *http.Request, sess *session, events <-chan protocol.Message, start protocol.Message, cancel func()) {
 	copyHeader(w.Header(), start.Header)
 	w.WriteHeader(start.StatusCode)
 	flusher, ok := w.(http.Flusher)

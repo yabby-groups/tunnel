@@ -317,6 +317,96 @@ func TestSSEForwarding(t *testing.T) {
 	}
 }
 
+func TestBinaryStreamForwarding(t *testing.T) {
+	firstChunk := []byte{0x00, 0xff, 0x10, 0x80}
+	secondChunk := []byte{0x7f, 0x00, 0xfe}
+	firstWritten := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", "7")
+		_, _ = w.Write(firstChunk)
+		w.(http.Flusher).Flush()
+		close(firstWritten)
+		<-releaseSecond
+		_, _ = w.Write(secondChunk)
+		w.(http.Flusher).Flush()
+	}))
+	defer local.Close()
+
+	tunnelServer, err := server.New(server.Config{BaseDomain: "tunnel.test"}, server.StaticAuthenticator{Token: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := httptest.NewServer(tunnelServer.Handler())
+	defer public.Close()
+	ctx, stopTunnel := context.WithCancel(context.Background())
+	defer stopTunnel()
+	urls := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- (&client.Tunnel{
+			ServerURL: "ws" + strings.TrimPrefix(public.URL, "http") + "/connect",
+			Token:     "test-token",
+			LocalURL:  local.URL,
+			OnURL:     func(value string) { urls <- value },
+		}).Run(ctx)
+	}()
+
+	var publicURL string
+	select {
+	case publicURL = <-urls:
+	case <-time.After(3 * time.Second):
+		t.Fatal("tunnel did not register")
+	}
+	parsed, err := url.Parse(publicURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodGet, public.URL+"/download", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = parsed.Host
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.Header.Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("content type = %q", response.Header.Get("Content-Type"))
+	}
+	select {
+	case <-firstWritten:
+	case <-time.After(3 * time.Second):
+		t.Fatal("local binary handler did not write its first chunk")
+	}
+	first := make([]byte, len(firstChunk))
+	if _, err := io.ReadFull(response.Body, first); err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(firstChunk) {
+		t.Fatalf("first chunk = %x, want %x", first, firstChunk)
+	}
+	close(releaseSecond)
+	second, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second) != string(secondChunk) {
+		t.Fatalf("second chunk = %x, want %x", second, secondChunk)
+	}
+	stopTunnel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not stop")
+	}
+}
+
 func TestFixedSubdomainsCanRunConcurrently(t *testing.T) {
 	newLocal := func(body string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

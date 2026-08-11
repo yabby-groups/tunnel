@@ -160,10 +160,10 @@ func (t *Tunnel) handleRequest(ctx context.Context, local *url.URL, msg protocol
 		return
 	}
 	defer resp.Body.Close()
-	responseIsEventStream := isEventStream(resp.Header)
-	if responseIsEventStream || (resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && acceptsEventStream(req.Header)) {
+	streamResponse, normalizeEventStream := shouldStreamResponse(resp, req.Header)
+	if streamResponse {
 		header := filteredHeader(resp.Header)
-		if !responseIsEventStream {
+		if normalizeEventStream {
 			header.Set("Content-Type", "text/event-stream")
 		}
 		if err := send(protocol.Message{
@@ -229,6 +229,25 @@ func acceptsEventStream(header http.Header) bool {
 		}
 	}
 	return false
+}
+
+func shouldStreamResponse(response *http.Response, requestHeader http.Header) (stream bool, normalizeEventStream bool) {
+	if isEventStream(response.Header) {
+		return true, false
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return false, false
+	}
+	if acceptsEventStream(requestHeader) {
+		return true, true
+	}
+	return isBinaryMediaType(response.Header) || response.ContentLength < 0, false
+}
+
+func isBinaryMediaType(header http.Header) bool {
+	mediaType, _, err := mime.ParseMediaType(header.Get("Content-Type"))
+	mediaType = strings.ToLower(mediaType)
+	return err == nil && !strings.HasPrefix(mediaType, "text/") && mediaType != "application/json"
 }
 
 func (t *Tunnel) openWebSocket(ctx context.Context, local *url.URL, msg protocol.Message, send func(protocol.Message) error, sockets *sync.Map) {
