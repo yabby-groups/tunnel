@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -88,6 +89,8 @@ func (t *Tunnel) runOnce(ctx context.Context, dialer websocket.Dialer, local *ur
 	}
 	var sockets sync.Map // map[string]*websocket.Conn
 	defer sockets.Range(func(_, value any) bool { value.(*websocket.Conn).Close(); return true })
+	var requests sync.Map // map[string]context.CancelFunc
+	defer requests.Range(func(_, value any) bool { value.(context.CancelFunc)(); return true })
 
 	for {
 		var msg protocol.Message
@@ -110,7 +113,11 @@ func (t *Tunnel) runOnce(ctx context.Context, dialer websocket.Dialer, local *ur
 			if websocket.IsWebSocketUpgrade(&http.Request{Header: msg.Header}) {
 				go t.openWebSocket(ctx, local, msg, send, &sockets)
 			} else {
-				go t.handleRequest(ctx, local, msg, send)
+				go t.handleRequest(ctx, local, msg, send, &requests)
+			}
+		case protocol.Cancel:
+			if value, ok := requests.Load(msg.ID); ok {
+				value.(context.CancelFunc)()
 			}
 		case protocol.WSData:
 			if value, ok := sockets.Load(msg.ID); ok {
@@ -126,8 +133,14 @@ func (t *Tunnel) runOnce(ctx context.Context, dialer websocket.Dialer, local *ur
 	}
 }
 
-func (t *Tunnel) handleRequest(ctx context.Context, local *url.URL, msg protocol.Message, send func(protocol.Message) error) {
+func (t *Tunnel) handleRequest(ctx context.Context, local *url.URL, msg protocol.Message, send func(protocol.Message) error, requests *sync.Map) {
 	start := time.Now()
+	ctx, cancel := context.WithCancel(ctx)
+	requests.Store(msg.ID, cancel)
+	defer func() {
+		requests.Delete(msg.ID)
+		cancel()
+	}()
 	relative, err := url.Parse(msg.Path)
 	if err != nil {
 		_ = send(protocol.Message{Type: protocol.Error, ID: msg.ID, Error: "invalid request path"})
@@ -141,12 +154,46 @@ func (t *Tunnel) handleRequest(ctx context.Context, local *url.URL, msg protocol
 	}
 	req.Header = filteredHeader(msg.Header)
 	req.Host = local.Host
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	resp, err := localHTTPClient.Do(req)
 	if err != nil {
 		_ = send(protocol.Message{Type: protocol.Error, ID: msg.ID, Error: "local service: " + err.Error()})
 		return
 	}
 	defer resp.Body.Close()
+	responseIsEventStream := isEventStream(resp.Header)
+	if responseIsEventStream || (resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && acceptsEventStream(req.Header)) {
+		header := filteredHeader(resp.Header)
+		if !responseIsEventStream {
+			header.Set("Content-Type", "text/event-stream")
+		}
+		if err := send(protocol.Message{
+			Type: protocol.ResponseStart, ID: msg.ID, StatusCode: resp.StatusCode,
+			Header: header,
+		}); err != nil {
+			return
+		}
+		buffer := make([]byte, 32*1024)
+		for {
+			n, readErr := resp.Body.Read(buffer)
+			if n > 0 {
+				if err := send(protocol.Message{Type: protocol.ResponseData, ID: msg.ID, Body: append([]byte(nil), buffer[:n]...)}); err != nil {
+					return
+				}
+			}
+			if readErr == io.EOF {
+				_ = send(protocol.Message{Type: protocol.ResponseEnd, ID: msg.ID})
+				break
+			}
+			if readErr != nil {
+				_ = send(protocol.Message{Type: protocol.Error, ID: msg.ID, Error: "read local response: " + readErr.Error()})
+				break
+			}
+		}
+		if t.OnRequest != nil {
+			t.OnRequest(msg.Method, msg.Path, resp.StatusCode, time.Since(start))
+		}
+		return
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		_ = send(protocol.Message{Type: protocol.Error, ID: msg.ID, Error: "read local response: " + err.Error()})
@@ -159,6 +206,29 @@ func (t *Tunnel) handleRequest(ctx context.Context, local *url.URL, msg protocol
 	if t.OnRequest != nil {
 		t.OnRequest(msg.Method, msg.Path, resp.StatusCode, time.Since(start))
 	}
+}
+
+var localHTTPClient = &http.Client{Transport: func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 60 * time.Second
+	return transport
+}()}
+
+func isEventStream(header http.Header) bool {
+	mediaType, _, err := mime.ParseMediaType(header.Get("Content-Type"))
+	return err == nil && strings.EqualFold(mediaType, "text/event-stream")
+}
+
+func acceptsEventStream(header http.Header) bool {
+	for _, value := range header.Values("Accept") {
+		for _, mediaRange := range strings.Split(value, ",") {
+			mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(mediaRange))
+			if err == nil && strings.EqualFold(mediaType, "text/event-stream") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (t *Tunnel) openWebSocket(ctx context.Context, local *url.URL, msg protocol.Message, send func(protocol.Message) error, sockets *sync.Map) {

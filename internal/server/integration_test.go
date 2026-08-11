@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"net/http"
@@ -150,6 +151,162 @@ func TestWebSocketForwarding(t *testing.T) {
 		t.Fatalf("unexpected websocket response kind=%d body=%q", kind, data)
 	}
 	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not stop")
+	}
+}
+
+func TestSSEForwarding(t *testing.T) {
+	firstWritten := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	localCancelled := make(chan struct{})
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fallback" {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("data: fallback\n\n"))
+			w.(http.Flusher).Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		if r.URL.Path == "/cancel" {
+			_, _ = w.Write([]byte("data: waiting\n\n"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			close(localCancelled)
+			return
+		}
+		_, _ = w.Write([]byte("data: first\n\n"))
+		w.(http.Flusher).Flush()
+		close(firstWritten)
+		select {
+		case <-releaseSecond:
+			_, _ = w.Write([]byte("data: second\n\n"))
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+			close(localCancelled)
+		}
+	}))
+	defer local.Close()
+
+	tunnelServer, err := server.New(server.Config{BaseDomain: "tunnel.test"}, server.StaticAuthenticator{Token: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := httptest.NewServer(tunnelServer.Handler())
+	defer public.Close()
+
+	ctx, stopTunnel := context.WithCancel(context.Background())
+	defer stopTunnel()
+	urls := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- (&client.Tunnel{
+			ServerURL: "ws" + strings.TrimPrefix(public.URL, "http") + "/connect",
+			Token:     "test-token",
+			LocalURL:  local.URL,
+			OnURL:     func(value string) { urls <- value },
+		}).Run(ctx)
+	}()
+
+	var publicURL string
+	select {
+	case publicURL = <-urls:
+	case <-time.After(3 * time.Second):
+		t.Fatal("tunnel did not register")
+	}
+	parsed, err := url.Parse(publicURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodGet, public.URL+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = parsed.Host
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+	if response.Header.Get("Content-Type") != "text/event-stream; charset=utf-8" {
+		t.Fatalf("content type = %q", response.Header.Get("Content-Type"))
+	}
+	if response.Header.Get("Cache-Control") != "no-cache" {
+		t.Fatalf("cache control = %q", response.Header.Get("Cache-Control"))
+	}
+	select {
+	case <-firstWritten:
+	case <-time.After(3 * time.Second):
+		t.Fatal("local SSE handler did not write its first event")
+	}
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "data: first\n" {
+		t.Fatalf("first event = %q", line)
+	}
+	if blank, err := reader.ReadString('\n'); err != nil || blank != "\n" {
+		t.Fatalf("first event terminator = %q, %v", blank, err)
+	}
+
+	close(releaseSecond)
+	second, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second) != "data: second\n\n" {
+		t.Fatalf("second event = %q", second)
+	}
+
+	fallback, err := http.NewRequest(http.MethodGet, public.URL+"/fallback", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback.Host = parsed.Host
+	fallback.Header.Set("Accept", "text/event-stream")
+	fallbackResponse, err := http.DefaultClient.Do(fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackBody, err := io.ReadAll(fallbackResponse.Body)
+	fallbackResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallbackResponse.Header.Get("Content-Type") != "text/event-stream" || string(fallbackBody) != "data: fallback\n\n" {
+		t.Fatalf("fallback response = content-type %q, body %q", fallbackResponse.Header.Get("Content-Type"), fallbackBody)
+	}
+
+	// A separate stream verifies that cancellation reaches the local handler.
+	cancelCtx, cancelStream := context.WithCancel(context.Background())
+	cancelReq, err := http.NewRequestWithContext(cancelCtx, http.MethodGet, public.URL+"/cancel", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelReq.Host = parsed.Host
+	cancelResponse, err := http.DefaultClient.Do(cancelReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelStream()
+	cancelResponse.Body.Close()
+	select {
+	case <-localCancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("public cancellation did not cancel local SSE request")
+	}
+	stopTunnel()
 	select {
 	case err := <-done:
 		if err != nil {

@@ -71,7 +71,9 @@ hostname-to-connection map remains in memory, so run one tunnel-server replica.
 - /healthz and /readyz return process health.
 - /metrics exposes request, proxy-error, and active-session metrics.
 - Defaults: up to 10 stable subdomains per user, 100 concurrent HTTP requests
-  per tunnel, a 32 MiB request body, and a 60 second request timeout.
+  per tunnel, a 32 MiB request body, and a 60 second response-start timeout.
+  `text/event-stream` responses are forwarded incrementally and stay open until
+  either side closes; each active stream uses one concurrent-request slot.
 
 This implementation intentionally excludes custom domains, TCP forwarding,
 billing, and request-body logging.

@@ -17,11 +17,15 @@ type Message struct {
 }
 
 const (
-	Registered = "registered"
-	Request    = "request"
-	Response   = "response"
-	WSAccept   = "ws_accept"
-	WSData     = "ws_data"
-	WSClose    = "ws_close"
-	Error      = "error"
+	Registered    = "registered"
+	Request       = "request"
+	Response      = "response"
+	ResponseStart = "response_start"
+	ResponseData  = "response_data"
+	ResponseEnd   = "response_end"
+	Cancel        = "cancel"
+	WSAccept      = "ws_accept"
+	WSData        = "ws_data"
+	WSClose       = "ws_close"
+	Error         = "error"
 )

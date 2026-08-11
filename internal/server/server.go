@@ -201,7 +201,7 @@ func validSubdomain(value string) bool {
 
 func (s *session) dispatch(msg protocol.Message) {
 	switch msg.Type {
-	case protocol.Response, protocol.WSAccept, protocol.WSData, protocol.WSClose, protocol.Error:
+	case protocol.Response, protocol.ResponseStart, protocol.ResponseData, protocol.ResponseEnd, protocol.WSAccept, protocol.WSData, protocol.WSClose, protocol.Error:
 		if ch, ok := s.requests.Load(msg.ID); ok {
 			select {
 			case ch.(chan protocol.Message) <- msg:
@@ -259,6 +259,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	reply := make(chan protocol.Message, 1)
 	sess.requests.Store(id, reply)
 	defer sess.requests.Delete(id)
+	cancel := func() { _ = sess.send(protocol.Message{Type: protocol.Cancel, ID: id}) }
 	if err := sess.send(protocol.Message{
 		Type: protocol.Request, ID: id, Method: r.Method, Path: r.URL.RequestURI(),
 		Header: filteredHeader(r.Header), Body: body,
@@ -274,15 +275,53 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, response.Error, http.StatusBadGateway)
 			return
 		}
+		if response.Type == protocol.ResponseStart {
+			s.proxyEventStream(w, r, sess, reply, response, cancel)
+			return
+		}
 		copyHeader(w.Header(), response.Header)
 		w.WriteHeader(response.StatusCode)
 		_, _ = w.Write(response.Body)
 	case <-time.After(s.config.RequestTimeout):
+		cancel()
 		s.metrics.proxyErrors.Add(1)
 		http.Error(w, "tunnel request timed out", http.StatusGatewayTimeout)
+	case <-r.Context().Done():
+		cancel()
 	case <-sess.closed:
 		s.metrics.proxyErrors.Add(1)
 		http.Error(w, "tunnel unavailable", http.StatusServiceUnavailable)
+	}
+}
+
+func (s *Server) proxyEventStream(w http.ResponseWriter, r *http.Request, sess *session, events <-chan protocol.Message, start protocol.Message, cancel func()) {
+	copyHeader(w.Header(), start.Header)
+	w.WriteHeader(start.StatusCode)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		cancel()
+		return
+	}
+	flusher.Flush()
+	for {
+		select {
+		case event := <-events:
+			switch event.Type {
+			case protocol.ResponseData:
+				if _, err := w.Write(event.Body); err != nil {
+					cancel()
+					return
+				}
+				flusher.Flush()
+			case protocol.ResponseEnd, protocol.Error:
+				return
+			}
+		case <-r.Context().Done():
+			cancel()
+			return
+		case <-sess.closed:
+			return
+		}
 	}
 }
 
