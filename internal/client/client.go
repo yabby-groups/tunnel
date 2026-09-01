@@ -208,11 +208,18 @@ func (t *Tunnel) handleRequest(ctx context.Context, local *url.URL, msg protocol
 	}
 }
 
-var localHTTPClient = &http.Client{Transport: func() *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 60 * time.Second
-	return transport
-}()}
+var localHTTPClient = &http.Client{
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		// The public browser, rather than the tunnel client, must receive login
+		// redirects and their Set-Cookie headers.
+		return http.ErrUseLastResponse
+	},
+	Transport: func() *http.Transport {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.ResponseHeaderTimeout = 60 * time.Second
+		return transport
+	}(),
+}
 
 func isEventStream(header http.Header) bool {
 	mediaType, _, err := mime.ParseMediaType(header.Get("Content-Type"))
