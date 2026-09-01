@@ -161,6 +161,74 @@ func TestWebSocketForwarding(t *testing.T) {
 	}
 }
 
+func TestWebSocketForwardingWithCompression(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Upgrade(w, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer conn.Close()
+		kind, data, err := conn.ReadMessage()
+		if err == nil {
+			_ = conn.WriteMessage(kind, data)
+		}
+	}))
+	defer local.Close()
+
+	tunnelServer, err := server.New(server.Config{BaseDomain: "tunnel.test"}, server.StaticAuthenticator{Token: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := httptest.NewServer(tunnelServer.Handler())
+	defer public.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	urls := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- (&client.Tunnel{
+			ServerURL: "ws" + strings.TrimPrefix(public.URL, "http") + "/connect",
+			Token:     "test-token",
+			LocalURL:  local.URL,
+			OnURL:     func(value string) { urls <- value },
+		}).Run(ctx)
+	}()
+
+	publicURL := <-urls
+	parsed, err := url.Parse(publicURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx,
+		"ws"+strings.TrimPrefix(public.URL, "http")+"/socket",
+		http.Header{
+			"Host":                     []string{parsed.Host},
+			"Sec-WebSocket-Extensions": []string{"permessage-deflate"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	payload := []byte(strings.Repeat("code-server-message-", 16*1024))
+	if err := conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		t.Fatal(err)
+	}
+	kind, received, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != websocket.BinaryMessage || string(received) != string(payload) {
+		t.Fatalf("unexpected compressed response kind=%d length=%d", kind, len(received))
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSSEForwarding(t *testing.T) {
 	firstWritten := make(chan struct{})
 	releaseSecond := make(chan struct{})
