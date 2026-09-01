@@ -229,6 +229,76 @@ func TestWebSocketForwardingWithCompression(t *testing.T) {
 	}
 }
 
+func TestWebSocketForwardingPreservesPublicHostForOriginCheck(t *testing.T) {
+	publicHost := make(chan string, 1)
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != <-publicHost || r.Header.Get("Origin") != "https://origin.tunnel.test" {
+			http.Error(w, "origin rejected", http.StatusForbidden)
+			return
+		}
+		conn, err := websocket.Upgrade(w, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer conn.Close()
+		kind, data, err := conn.ReadMessage()
+		if err == nil {
+			_ = conn.WriteMessage(kind, data)
+		}
+	}))
+	defer local.Close()
+
+	tunnelServer, err := server.New(server.Config{BaseDomain: "tunnel.test"}, server.StaticAuthenticator{Token: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := httptest.NewServer(tunnelServer.Handler())
+	defer public.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	urls := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- (&client.Tunnel{
+			ServerURL: "ws" + strings.TrimPrefix(public.URL, "http") + "/connect",
+			Token:     "test-token",
+			LocalURL:  local.URL,
+			OnURL:     func(value string) { urls <- value },
+		}).Run(ctx)
+	}()
+
+	registeredURL := <-urls
+	parsed, err := url.Parse(registeredURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicHost <- parsed.Host
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx,
+		"ws"+strings.TrimPrefix(public.URL, "http")+"/socket",
+		http.Header{
+			"Host":   []string{parsed.Host},
+			"Origin": []string{"https://origin.tunnel.test"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("origin checked")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn.ReadMessage()
+	if err != nil || string(data) != "origin checked" {
+		t.Fatalf("origin-checked message = %q, error = %v", data, err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSSEForwarding(t *testing.T) {
 	firstWritten := make(chan struct{})
 	releaseSecond := make(chan struct{})

@@ -122,6 +122,7 @@ func (t *Tunnel) runOnce(ctx context.Context, dialer websocket.Dialer, local *ur
 		case protocol.WSData:
 			if value, ok := sockets.Load(msg.ID); ok {
 				if err := value.(*websocket.Conn).WriteMessage(msg.StatusCode, msg.Body); err != nil {
+					log.Printf("tunnel websocket write to local service id=%s: %v", msg.ID, err)
 					_ = send(protocol.Message{Type: protocol.WSClose, ID: msg.ID})
 				}
 			}
@@ -271,6 +272,7 @@ func (t *Tunnel) openWebSocket(ctx context.Context, local *url.URL, msg protocol
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, target.String(), filteredHeader(msg.Header))
 	if err != nil {
+		log.Printf("tunnel websocket local handshake id=%s target=%s: %v", msg.ID, target.Redacted(), err)
 		_ = send(protocol.Message{Type: protocol.Error, ID: msg.ID, Error: "local websocket: " + err.Error()})
 		return
 	}
@@ -286,9 +288,11 @@ func (t *Tunnel) openWebSocket(ctx context.Context, local *url.URL, msg protocol
 	for {
 		typ, data, err := conn.ReadMessage()
 		if err != nil {
+			log.Printf("tunnel websocket local read id=%s: %v", msg.ID, err)
 			return
 		}
 		if err := send(protocol.Message{Type: protocol.WSData, ID: msg.ID, StatusCode: typ, Body: data}); err != nil {
+			log.Printf("tunnel websocket relay write id=%s: %v", msg.ID, err)
 			return
 		}
 	}

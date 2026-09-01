@@ -5,6 +5,7 @@ import (
 	"encoding/base32"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -203,9 +204,14 @@ func (s *session) dispatch(msg protocol.Message) {
 	switch msg.Type {
 	case protocol.Response, protocol.ResponseStart, protocol.ResponseData, protocol.ResponseEnd, protocol.WSAccept, protocol.WSData, protocol.WSClose, protocol.Error:
 		if ch, ok := s.requests.Load(msg.ID); ok {
-			select {
-			case ch.(chan protocol.Message) <- msg:
-			case <-s.closed:
+			switch target := ch.(type) {
+			case chan protocol.Message:
+				select {
+				case target <- msg:
+				case <-s.closed:
+				}
+			case *webSocketEventQueue:
+				target.Push(msg)
 			}
 		}
 	}
@@ -327,18 +333,32 @@ func (s *Server) proxyStream(w http.ResponseWriter, r *http.Request, sess *sessi
 
 func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request, sess *session) {
 	id := fmt.Sprintf("ws-%d", sess.seq.Add(1))
-	events := make(chan protocol.Message, 32)
+	events := newWebSocketEventQueue()
 	sess.requests.Store(id, events)
-	defer sess.requests.Delete(id)
+	defer func() {
+		sess.requests.Delete(id)
+		events.Close()
+	}()
+	header := r.Header.Clone()
+	// Host is carried separately by net/http. Preserve the public authority so
+	// local WebSocket servers can validate the browser's Origin header.
+	header.Set("Host", r.Host)
 	if err := sess.send(protocol.Message{
-		Type: protocol.Request, ID: id, Method: r.Method, Path: r.URL.RequestURI(), Header: r.Header.Clone(),
+		Type: protocol.Request, ID: id, Method: r.Method, Path: r.URL.RequestURI(), Header: header,
 	}); err != nil {
+		log.Printf("tunnel websocket request relay id=%s: %v", id, err)
 		http.Error(w, "tunnel unavailable", http.StatusBadGateway)
 		return
 	}
 	select {
-	case event := <-events:
+	case event, ok := <-events.Output():
+		if !ok {
+			log.Printf("tunnel websocket queue closed before local handshake id=%s", id)
+			http.Error(w, "tunnel unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		if event.Type != protocol.WSAccept {
+			log.Printf("tunnel websocket local handshake rejected id=%s: %s", id, event.Error)
 			http.Error(w, event.Error, http.StatusBadGateway)
 			return
 		}
@@ -351,6 +371,7 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request, sess *se
 	}
 	public, err := websocket.Upgrade(w, r)
 	if err != nil {
+		log.Printf("tunnel websocket public handshake id=%s: %v", id, err)
 		return
 	}
 	defer public.Close()
@@ -360,6 +381,7 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request, sess *se
 		for {
 			typ, data, err := public.ReadMessage()
 			if err != nil {
+				log.Printf("tunnel websocket public read id=%s: %v", id, err)
 				_ = sess.send(protocol.Message{Type: protocol.WSClose, ID: id})
 				return
 			}
@@ -370,10 +392,15 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request, sess *se
 	}()
 	for {
 		select {
-		case event := <-events:
+		case event, ok := <-events.Output():
+			if !ok {
+				log.Printf("tunnel websocket queue closed id=%s", id)
+				return
+			}
 			switch event.Type {
 			case protocol.WSData:
 				if err := public.WriteMessage(event.StatusCode, event.Body); err != nil {
+					log.Printf("tunnel websocket public write id=%s: %v", id, err)
 					return
 				}
 			case protocol.WSClose, protocol.Error:
