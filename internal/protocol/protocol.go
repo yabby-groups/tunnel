@@ -10,6 +10,7 @@ type Message struct {
 	URL        string      `json:"url,omitempty"`
 	Method     string      `json:"method,omitempty"`
 	Path       string      `json:"path,omitempty"`
+	Host       string      `json:"host,omitempty"`
 	Header     http.Header `json:"header,omitempty"`
 	StatusCode int         `json:"status_code,omitempty"`
 	Body       []byte      `json:"body,omitempty"`

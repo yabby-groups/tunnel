@@ -17,9 +17,14 @@ import (
 )
 
 func TestHTTPForwarding(t *testing.T) {
+	publicHost := make(chan string, 1)
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/hello" || r.URL.RawQuery != "name=myna" {
 			http.NotFound(w, r)
+			return
+		}
+		if r.Host != <-publicHost {
+			http.Error(w, "unexpected host", http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("X-Local-Service", "yes")
@@ -64,6 +69,7 @@ func TestHTTPForwarding(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Host = parsed.Host
+	publicHost <- parsed.Host
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)

@@ -154,7 +154,7 @@ func (t *Tunnel) handleRequest(ctx context.Context, local *url.URL, msg protocol
 		return
 	}
 	req.Header = filteredHeader(msg.Header)
-	req.Host = local.Host
+	req.Host = msg.Host
 	resp, err := localHTTPClient.Do(req)
 	if err != nil {
 		_ = send(protocol.Message{Type: protocol.Error, ID: msg.ID, Error: "local service: " + err.Error()})

@@ -268,6 +268,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	cancel := func() { _ = sess.send(protocol.Message{Type: protocol.Cancel, ID: id}) }
 	if err := sess.send(protocol.Message{
 		Type: protocol.Request, ID: id, Method: r.Method, Path: r.URL.RequestURI(),
+		Host:   r.Host,
 		Header: filteredHeader(r.Header), Body: body,
 	}); err != nil {
 		s.metrics.proxyErrors.Add(1)
